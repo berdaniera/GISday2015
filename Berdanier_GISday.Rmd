@@ -1,0 +1,146 @@
+---
+title: "Forests and Water"
+author: "Aaron Berdanier, Nicholas School of Environment"
+date: "11/20/2015"
+output: html_document
+---
+
+```{r echo=FALSE, message=FALSE}
+library(raster)
+library(rgdal)
+library(sp)
+load("GISday.Rdata")
+```
+
+# GIS and R
+
+## A GIS is powerful. R is powerful. Together they are a force to be reckoned with.
+
+***
+
+# An example with USFS Forest Inventory and Analysis
+
+## Get all of the FIA plots in the United States from the internet.
+
+```{r eval=FALSE}
+library(raster)
+library(rgdal)
+library(sp)
+plotdat <- matrix(NA,nrow=0,ncol=57)
+states <- state.abb[which(!state.abb%in%c("HI","AK"))]
+prg <- txtProgressBar(min = 0, max = length(states), char = "+",style = 3)
+for(s in 1:length(states)){
+  st <- states[s]
+  url <- paste0("http://apps.fs.fed.us/fiadb-downloads/",st,"_PLOT.csv")
+  tmp <- read.csv(url)
+  plotdat <- rbind(plotdat,tmp)
+  setTxtProgressBar(prg, s)  
+}
+close(prg)
+
+# only forested plots with coordinates
+forestdat <- plotdat[which(plotdat$PLOT_STATUS_CD==1&!is.na(plotdat$LON)),] 
+```
+
+## Where are our forests?
+
+```{r}
+# number of plots
+nrow(forestdat) 
+
+# projected coordinates, longlat, datum & ellps WGS84
+coo <- SpatialPoints(forestdat[,c("LON","LAT")],CRS("+init=epsg:4326"))
+par(mar=c(0,0,0,0))
+plot(coo,pch=".",col="#00000010")
+```
+
+
+# Predicting forests
+###  **Question:** Drought impacts on forest extent?
+
+#### **Data from** Dobrowski, S.Z., J. Abatzoglou, A.K. Swanson, J.A. Greenberg, A.R. Mynsberge, Z.A. Holden, M.K. Schwartz (2013) The climate velocity of the contiguous United States during the 20th century. Global Change Biology 19: 241-251. [Download from internet](http://adaptwest.databasin.org/pages/adaptwest-waterbalance)
+
+```{r eval=FALSE}
+# load data
+ff <- list.files("~/Downloads/def_2000_2009/")
+def <- stack(paste0("~/Downloads/def_2000_2009/",ff))
+# average across years
+mndef <- stackApply(def,rep(1,nlayers(def)),fun="mean")
+
+# reproject to match forest plots
+defpr <- projectRaster(mndef,crs=projection(coo))
+defpro <- aggregate(defpr,12) # to 0.1 degrees
+```
+
+```{r echo=FALSE}
+par(mar=c(0,0,2,0))
+plot(defpro, main="Climatic water deficit (PET - AET)", col=terrain.colors(255))
+```
+
+## Match FIA plots to climate map by *rasterizing* 
+#### Sort of like this:
+
+```{r echo=FALSE}
+ext <- extent(defpro)
+par(mar=c(0,0,0,0))
+plot(coo,pch=".",col="#00000010")
+abline(v=seq(ext[1],ext[2],length.out=dim(defpro)[2]/10),col="#00000066")
+abline(h=seq(ext[3],ext[4],length.out=dim(defpro)[1]/10),col="#00000066")
+#
+```
+
+```{r}
+cooras <- rasterize(coo,defpro,
+                    fun=function(x,...) if(length(x)>0) 1, na.rm=T)
+cooras[is.na(cooras)] <- 0
+cooras[is.na(values(defpro))] <- NA
+
+```
+
+## Then, a statistical model...
+
+```{r}
+forestmat <- data.frame(deficit=values(defpro), forest=values(cooras))
+fmod <- glm(forest~deficit, data=forestmat, family=binomial())
+summary(fmod)
+```
+
+```{r echo=FALSE}
+par(mar=c(4,4,0.4,0.4))
+boxplot(deficit~forest, data=forestmat, at=c(0,1),
+        horizontal=T,las=1,staplewex=0,lty=1,outline=F,frame=F,
+        ylab="Forest?",xlab="Climatic water deficit (PET - AET)")
+defpre <- seq(1,2500)
+forpre <- predict(fmod,data.frame(deficit=defpre),type="response")
+lines(forpre~defpre,lwd=3)
+forval <- -coef(fmod)[1]/coef(fmod)[2]
+abline(v=forval, lwd=5, col="#001A57")
+```
+
+## Now, we can make some predictions
+
+```{r}
+# transformed to US National Atlas Equal Area
+coopr <- spTransform(coo,CRS("+init=epsg:2163"))
+defplot <- projectRaster(defpro,crs="+init=epsg:2163")
+```
+
+```{r echo=FALSE}
+par(mar=c(0,0,2,0))
+plot(defplot, col=terrain.colors(255),main="Climatic water deficit (PET - AET)")
+```
+
+```{r echo=FALSE}
+par(mar=c(0,0,2,0))
+plot(defplot, col=terrain.colors(255),main="Deficit + FIA plots")
+points(coopr,pch=".",col="#00000015")
+```
+
+```{r echo=FALSE}
+par(mar=c(0,0,2,0))
+plot(defplot, col=terrain.colors(255),main="Deficit + Plots + Prediction")
+points(coopr,pch=".",col="#00000015")
+contour(defplot,nlevels=1,labels="Pr=0.5",levels=forval,add=T,lwd=3,col="#001A57")
+```
+
+## Feel free to email me: abb30@duke.edu
